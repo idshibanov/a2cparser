@@ -3,7 +3,9 @@
 #include <iostream>
 
 constexpr uint32_t a2cFileType = 0x04507989;
+
 constexpr size_t BufferSizeLimit = 2560;
+uint8_t readBuffer[BufferSizeLimit] = {};
 
 constexpr std::array<uint32_t, 6> DataBlocks = {
     0xAAAAAAAA, // player info
@@ -21,6 +23,13 @@ struct SectionHeader
     uint16_t unused = 0;
     uint16_t crypt = 0;
     uint32_t checksum = 0;
+};
+
+enum class ReadingState
+{
+    MALFORMED,
+    MISMATCH,
+    VALID
 };
 
 void decryptData( uint8_t * sectionData, SectionHeader header )
@@ -57,13 +66,46 @@ bool verifyChecksum( uint8_t * sectionData, SectionHeader header )
     return sectionChecksum == header.checksum;
 }
 
+ReadingState processBlock( std::ifstream & infile, std::ofstream & outfile, uint32_t blockHeading )
+{
+    std::cout << "Reading " << blockHeading << " header." << std::endl;
+
+    SectionHeader header;
+    infile.read( reinterpret_cast<char *>( &header ), sizeof( header ) );
+
+    const auto headerPos = infile.tellg();
+    if ( header.magic != blockHeading ) {
+        std::cerr << "Unknown data section: " << header.magic << std::endl;
+        return ReadingState::MALFORMED;
+    }
+
+    if ( header.length > BufferSizeLimit ) {
+        infile.ignore( header.length );
+        const auto offset = infile.tellg() - headerPos;
+        std::cerr << "Section to big to process! Skipping " << offset << " bytes." << std::endl;
+        return ReadingState::MISMATCH;
+    }
+
+    infile.read( reinterpret_cast<char *>( &readBuffer ), header.length );
+
+    decryptData( readBuffer, header );
+
+    if ( !verifyChecksum( readBuffer, header ) ) {
+        std::cerr << "Invalid checksum!" << std::endl;
+        return ReadingState::MISMATCH;
+    }
+
+    outfile.write( reinterpret_cast<const char *>( &header ), sizeof( header ) );
+    outfile.write( reinterpret_cast<const char *>( readBuffer ), header.length );
+
+    return ReadingState::VALID;
+}
+
 int main()
 {
-    uint8_t buffer[BufferSizeLimit] = {};
     std::cout << "Start" << std::endl;
 
     std::ifstream infile( "342679700273.a2c", std::ios::binary );
-    std::ofstream outfile( "output.bin", std::ios::binary );
     if ( !infile ) {
         std::cerr << "Cannot open a2c file for reading!\n";
         return 2;
@@ -76,68 +118,23 @@ int main()
         std::cerr << "It's not an a2c file!\n";
         return 2;
     }
+
+    std::ofstream outfile( "output.bin", std::ios::binary );
+    if ( !outfile ) {
+        std::cerr << "Cannot create output bin file!\n";
+        return 2;
+    }
     outfile.write( reinterpret_cast<const char *>( &fileType ), sizeof( fileType ) );
 
     std::streampos pos = infile.tellg();
     std::cout << "Current file position: " << pos << std::endl;
 
-    // Process player info
+    processBlock( infile, outfile, DataBlocks[0] );
 
-    SectionHeader header;
-    infile.read( reinterpret_cast<char *>( &header ), sizeof( SectionHeader ) );
-    std::cout << "Reading " << std::hex << header.magic << " header." << std::endl;
-
-    if ( header.magic == DataBlocks[0] ) {
-        std::cout << "Parsing player info section. Seed is " << std::hex << header.crypt << std::endl;
-
-        if ( header.length > BufferSizeLimit ) {
-            std::cerr << "Too big of a section! Skipping! " << header.length << " bytes." << std::endl;
-            return 2;
-        }
-        infile.read( reinterpret_cast<char *>( &buffer ), header.length );
-
-        std::cout << "Data before: " << buffer << std::endl;
-        decryptData( buffer, header );
-        std::cout << "Data after: " << buffer << std::endl;
-
-        if ( !verifyChecksum( buffer, header ) ) {
-            std::cerr << "Invalid checksum!" << std::endl;
-            return 2;
-        }
-
-        outfile.write( reinterpret_cast<const char *>( &header ), sizeof( header ) );
-        outfile.write( reinterpret_cast<const char *>( buffer ), header.length );
-    }
-
-    infile.read( reinterpret_cast<char *>( &header ), sizeof( header ) );
-    std::cout << "Reading " << std::hex << header.magic << " header." << std::endl;
-
-    if ( header.magic == DataBlocks[1] ) {
-        std::cout << "Parsing stats section. Seed is " << std::hex << header.crypt << std::endl;
-
-        if ( header.length > 256 ) {
-            std::cerr << "Too big of a section! Skipping! " << header.length << " bytes." << std::endl;
-            return 2;
-        }
-        infile.read( reinterpret_cast<char *>( &buffer ), header.length );
-
-        std::cout << "Data before: " << buffer << std::endl;
-        decryptData( buffer, header );
-        std::cout << "Data after: " << buffer << std::endl;
-
-        if ( !verifyChecksum( buffer, header ) ) {
-            std::cerr << "Invalid checksum!" << std::endl;
-            return 2;
-        }
-
-        outfile.write( reinterpret_cast<const char *>( &header ), sizeof( header ) );
-        outfile.write( reinterpret_cast<const char *>( buffer ), header.length );
-    }
+    std::cout << "Wrote " << outfile.tellp() << " bytes to output.bin\n";
 
     infile.close();
     outfile.close();
-
-    std::cout << "Wrote " << header.length << " bytes to output.bin\n";
 
     return 0;
 }
