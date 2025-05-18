@@ -1,9 +1,18 @@
+#include <array>
 #include <iostream>
 #include <fstream>
 
-const uint32_t a2cFileType = 0x04507989;
-const uint32_t HeadPlayerInfo = 0xAAAAAAAA;
-const uint32_t HeadStatsBlock = 0x55555555;
+constexpr uint32_t a2cFileType = 0x04507989;
+constexpr size_t BufferSizeLimit = 2560;
+
+constexpr std::array<uint32_t, 6> DataBlocks = {
+	0xAAAAAAAA, // player info
+	0x55555555, // state
+	0x40A40A40, // serialized item names
+	0xDE0DE0DE, // unknown
+	0x41392521, // char stats
+	0x3A5A3A5A, // unknown
+};
 
 struct SectionHeader {
 	uint32_t magic = 0;
@@ -46,7 +55,7 @@ bool verifyChecksum(uint8_t* sectionData, SectionHeader header) {
 }
 
 int main() {
-	uint8_t buffer[256] = {};
+	uint8_t buffer[BufferSizeLimit] = {};
 	std::cout << "Start" << std::endl;
 
 	std::ifstream infile("342679700273.a2c", std::ios::binary);
@@ -74,10 +83,10 @@ int main() {
 	infile.read(reinterpret_cast<char*>(&header), sizeof(SectionHeader));
 	std::cout << "Reading " << std::hex << header.magic << " header." << std::endl;
 
-	if (header.magic == HeadPlayerInfo) {
+	if (header.magic == DataBlocks[0]) {
 		std::cout << "Parsing player info section. Seed is " << std::hex << header.crypt << std::endl;
 
-		if (header.length > 256) {
+		if (header.length > BufferSizeLimit) {
 			std::cerr << "Too big of a section! Skipping! " << header.length << " bytes." << std::endl;
 			return 2;
 		}
@@ -99,7 +108,7 @@ int main() {
 	infile.read(reinterpret_cast<char*>(&header), sizeof(header));
 	std::cout << "Reading " << std::hex << header.magic << " header." << std::endl;
 
-	if (header.magic == HeadStatsBlock) {
+	if (header.magic == DataBlocks[1]) {
 		std::cout << "Parsing stats section. Seed is " << std::hex << header.crypt << std::endl;
 
 		if (header.length > 256) {
