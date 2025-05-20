@@ -1,4 +1,5 @@
 #include <array>
+#include <cassert>
 #include <fstream>
 #include <iostream>
 
@@ -57,6 +58,34 @@ void decryptData( uint8_t * sectionData, SectionHeader header )
     // std::cout << std::dec;
 }
 
+template <typename T, typename F>
+T deobfuscateValue( T value, T previous, F && modifier )
+{
+    value = static_cast<T>( value + previous * 5 );
+    return static_cast<T>( modifier( value ) );
+}
+
+uint32_t decryptStatsBlock( std::ifstream & infile, uint8_t * sectionData, SectionHeader header )
+{
+    std::cout << "Processing special block " << std::hex << header.magic << std::endl;
+
+    uint32_t mask = 0x1;
+
+    if ( header.crypt & mask ) {
+        infile.ignore( 1 );
+    }
+
+    uint32_t value = 0;
+    infile.read( reinterpret_cast<char *>( &value ), sizeof( value ) );
+
+    std::cout << "Converting " << value;
+    const auto modifier = []( uint32_t x ) { return x ^ 0x1529251; };
+    value = modifier(value);
+    std::cout << " to " << value << std::endl << std::dec;
+
+    return header.length;
+}
+
 bool verifyChecksum( uint8_t * sectionData, SectionHeader header )
 {
     uint32_t sectionChecksum = 0;
@@ -69,7 +98,7 @@ bool verifyChecksum( uint8_t * sectionData, SectionHeader header )
 
 ReadingState processBlock( std::ifstream & infile, std::ofstream & outfile, uint32_t blockHeading )
 {
-    std::cout << "Reading " << blockHeading << " header." << std::endl;
+    std::cout << "Reading " << std::hex << blockHeading << std::dec << " block." << std::endl;
 
     SectionHeader header;
     infile.read( reinterpret_cast<char *>( &header ), sizeof( header ) );
@@ -87,9 +116,16 @@ ReadingState processBlock( std::ifstream & infile, std::ofstream & outfile, uint
         return ReadingState::MISMATCH;
     }
 
-    infile.read( reinterpret_cast<char *>( &readBuffer ), header.length );
-
-    decryptData( readBuffer, header );
+    if ( blockHeading == DataBlocks[4] ) {
+        // This block omits decoding bytes so len should be smaller
+        const uint32_t updatedLen = decryptStatsBlock( infile, readBuffer, header );
+        assert( updatedLen <= header.length );
+        header.length = updatedLen;
+    }
+    else {
+        infile.read( reinterpret_cast<char *>( &readBuffer ), header.length );
+        decryptData( readBuffer, header );
+    }
 
     if ( !verifyChecksum( readBuffer, header ) ) {
         std::cerr << "Invalid checksum!" << std::endl;
