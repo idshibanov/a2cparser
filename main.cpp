@@ -2,11 +2,12 @@
 #include <cassert>
 #include <fstream>
 #include <iostream>
+#include <functional>
 
 constexpr uint32_t a2cFileType = 0x04507989;
 
 constexpr size_t BufferSizeLimit = 2560;
-uint8_t readBuffer[BufferSizeLimit] = {};
+char readBuffer[BufferSizeLimit] = {};
 
 constexpr std::array<uint32_t, 6> DataBlocks = {
     0xAAAAAAAA, // player info
@@ -26,6 +27,30 @@ struct SectionHeader
     uint32_t checksum = 0;
 };
 
+constexpr size_t ModifiersCount = 16;
+static const std::array<std::function<uint32_t( uint32_t, uint32_t, uint32_t )>, ModifiersCount> Modifiers= {
+    // 4 byte values
+    []( auto x, auto s, auto p ) { return x ^ 0x1529251; },
+    []( auto x, auto s, auto p ) { return x + s * 5 + 0x13141516; },
+    []( auto x, auto s, auto p ) { return x + p * 7 + 0xabcdef; },
+    []( auto x, auto s, auto p ) { return x ^ 0x17ff12aa; },
+    []( auto x, auto s, auto p ) { return x + s * 3 + 0xDEADBABE; },
+    // 1 byte, attributes
+    []( auto x, auto s, auto p ) { return x + s * 19 + p * 17; }, // change start afterwards
+    []( auto x, auto s, auto p ) { return x + p * 3; },
+    []( auto x, auto s, auto p ) { return x + p * 5 + s; },
+    []( auto x, auto s, auto p ) { return x + s * 7 + p * 9; },
+    // 4 bytes with late mask
+    []( auto x, auto s, auto p ) { return x - 0x10121974; },
+    []( auto x, auto s, auto p ) { return x; },
+    // exp table
+    []( auto x, auto s, auto p ) { return x ^ 0xdadedade; },
+    []( auto x, auto s, auto p ) { return x - 0x771; },
+    []( auto x, auto s, auto p ) { return x - 0x771; },
+    []( auto x, auto s, auto p ) { return x - 0x771; },
+    []( auto x, auto s, auto p ) { return x - 0x771; },
+};
+
 enum class ReadingState
 {
     MALFORMED,
@@ -33,7 +58,7 @@ enum class ReadingState
     VALID
 };
 
-void decryptData( uint8_t * sectionData, SectionHeader header )
+void decryptData( char * sectionData, SectionHeader header )
 {
     const uint32_t seed = header.crypt;
 
@@ -59,34 +84,48 @@ void decryptData( uint8_t * sectionData, SectionHeader header )
 }
 
 template <typename T, typename F>
-T deobfuscateValue( T value, T previous, F && modifier )
+T deobfuscateValue( T value, char * buffer, int index, T start, T previous, F && modifier )
 {
-    value = static_cast<T>( value + previous * 5 );
-    return static_cast<T>( modifier( value ) );
+    std::cout << "Converting " << std::hex << value;
+    value = static_cast<T>( modifier( value, start, previous ) );
+    std::cout << " to " << value << std::endl << std::dec;
+
+    T * output = reinterpret_cast<T *>( buffer );
+    output[index] = value;
+    return value;
 }
 
-uint32_t decryptStatsBlock( std::ifstream & infile, uint8_t * sectionData, SectionHeader header )
+uint32_t decryptStatsBlock( std::ifstream & infile, char * sectionData, SectionHeader header )
 {
     std::cout << "Processing special block " << std::hex << header.magic << std::endl;
 
-    uint32_t mask = 0x1;
-
-    if ( header.crypt & mask ) {
-        infile.ignore( 1 );
-    }
-
     uint32_t value = 0;
-    infile.read( reinterpret_cast<char *>( &value ), sizeof( value ) );
+    char * valuePtr = reinterpret_cast<char *>( &value );
+    uint16_t mask = 0x1;
 
-    std::cout << "Converting " << value;
-    const auto modifier = []( uint32_t x ) { return x ^ 0x1529251; };
-    value = modifier(value);
-    std::cout << " to " << value << std::endl << std::dec;
+    bool initialized = false;
+    uint32_t startingValue = 0;
+    uint32_t previous = 0;
+    for ( int i = 0; i < 5; i++ ) {
+        if ( header.crypt & mask ) {
+            infile.ignore( 1 );
+        }
+
+        infile.read( valuePtr, sizeof( value ) );
+
+        previous = deobfuscateValue<uint32_t>( value, sectionData, i, startingValue, previous, Modifiers[i] );
+        if ( !initialized ) {
+            startingValue = previous;
+            initialized = true;
+        }
+
+        mask <<= 1;
+    }
 
     return header.length;
 }
 
-bool verifyChecksum( uint8_t * sectionData, SectionHeader header )
+bool verifyChecksum( char * sectionData, SectionHeader header )
 {
     uint32_t sectionChecksum = 0;
     for ( uint32_t idx = 0; idx < header.length; idx++ ) {
@@ -117,10 +156,16 @@ ReadingState processBlock( std::ifstream & infile, std::ofstream & outfile, uint
     }
 
     if ( blockHeading == DataBlocks[4] ) {
+        const int startPos = infile.tellg();
+        const int blockEndPosition = startPos + header.length;
+
         // This block omits decoding bytes so len should be smaller
         const uint32_t updatedLen = decryptStatsBlock( infile, readBuffer, header );
         assert( updatedLen <= header.length );
         header.length = updatedLen;
+
+        // assert( infile.tellg() == blockEndPosition );
+        infile.seekg( blockEndPosition );
     }
     else {
         infile.read( reinterpret_cast<char *>( &readBuffer ), header.length );
