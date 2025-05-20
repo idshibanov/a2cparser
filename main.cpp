@@ -42,18 +42,19 @@ void decryptData( uint8_t * sectionData, SectionHeader header )
     for ( uint32_t idx = 0; idx < header.length; idx++ ) {
         const uint8_t edx = static_cast<uint8_t>( checksum >> 0x10 );
 
-        // std::cout << "Symbol " << std::hex << (int)(sectionData[idx]);
-        // std::cout << " XOR " << std::hex << edx;
+        // std::cout << "Symbol " << (int)(sectionData[idx]);
+        // std::cout << " XOR " << edx;
 
         sectionData[idx] = sectionData[idx] ^ edx;
 
-        // std::cout << " into " << std::hex << (int)(sectionData[idx]) << std::endl;
+        // std::cout << " into " << (int)(sectionData[idx]) << std::endl;
         checksum = checksum << 1;
 
         if ( ( idx & 0xf ) == 0xf ) {
             checksum = checksum | seed & ( 0xffff );
         }
     }
+    // std::cout << std::dec;
 }
 
 bool verifyChecksum( uint8_t * sectionData, SectionHeader header )
@@ -129,7 +130,11 @@ int main()
     std::streampos pos = infile.tellg();
     std::cout << "Current file position: " << pos << std::endl;
 
-    processBlock( infile, outfile, DataBlocks[0] );
+    for ( const uint32_t blockHeading : DataBlocks ) {
+        if ( processBlock( infile, outfile, blockHeading ) == ReadingState::MALFORMED ) {
+            break;
+        }
+    }
 
     std::cout << "Wrote " << outfile.tellp() << " bytes to output.bin\n";
 
