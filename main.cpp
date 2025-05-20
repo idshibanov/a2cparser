@@ -1,8 +1,8 @@
 #include <array>
 #include <cassert>
 #include <fstream>
-#include <iostream>
 #include <functional>
+#include <iostream>
 
 constexpr uint32_t a2cFileType = 0x04507989;
 
@@ -17,6 +17,7 @@ constexpr std::array<uint32_t, 6> DataBlocks = {
     0x41392521, // char stats
     0x3A5A3A5A, // unknown
 };
+constexpr size_t ExpectedStatBlockSize = 52;
 
 struct SectionHeader
 {
@@ -28,7 +29,7 @@ struct SectionHeader
 };
 
 constexpr size_t ModifiersCount = 16;
-static const std::array<std::function<uint32_t( uint32_t, uint32_t, uint32_t )>, ModifiersCount> Modifiers= {
+static const std::array<std::function<uint32_t( uint32_t, uint32_t, uint32_t )>, ModifiersCount> Modifiers = {
     // 4 byte values
     []( auto x, auto s, auto p ) { return x ^ 0x1529251; },
     []( auto x, auto s, auto p ) { return x + s * 5 + 0x13141516; },
@@ -41,14 +42,14 @@ static const std::array<std::function<uint32_t( uint32_t, uint32_t, uint32_t )>,
     []( auto x, auto s, auto p ) { return x + p * 5 + s; },
     []( auto x, auto s, auto p ) { return x + s * 7 + p * 9; },
     // 4 bytes with late mask
-    []( auto x, auto s, auto p ) { return x - 0x10121974; },
+    []( auto x, auto s, auto p ) { return x + 0xEFEDE68; }, // -0x10121974;
     []( auto x, auto s, auto p ) { return x; },
     // exp table
     []( auto x, auto s, auto p ) { return x ^ 0xdadedade; },
-    []( auto x, auto s, auto p ) { return x - 0x771; },
-    []( auto x, auto s, auto p ) { return x - 0x771; },
-    []( auto x, auto s, auto p ) { return x - 0x771; },
-    []( auto x, auto s, auto p ) { return x - 0x771; },
+    []( auto x, auto s, auto p ) { return x + p * 0xFFFFF88F; },
+    []( auto x, auto s, auto p ) { return x + p * 0xFFFFF88F; },
+    []( auto x, auto s, auto p ) { return x + p * 0xFFFFF88F; },
+    []( auto x, auto s, auto p ) { return x + p * 0xFFFFF88F; },
 };
 
 enum class ReadingState
@@ -84,52 +85,73 @@ void decryptData( char * sectionData, SectionHeader header )
 }
 
 template <typename T, typename F>
-T deobfuscateValue( T value, char * buffer, int index, T start, T previous, F && modifier )
+T deobfuscateValue( T value, char * buffer, T start, T previous, F && modifier )
 {
     std::cout << "Converting " << std::hex << value;
     value = static_cast<T>( modifier( value, start, previous ) );
     std::cout << " to " << value << std::endl << std::dec;
 
     T * output = reinterpret_cast<T *>( buffer );
-    output[index] = value;
+    output[0] = value;
     return value;
 }
 
-uint32_t decryptStatsBlock( std::ifstream & infile, char * sectionData, SectionHeader header )
+template <typename T>
+void decryptStatsSection( std::ifstream & infile, char * sectionData, int & sectionOffset, uint16_t & mask, uint16_t crypt, size_t modIndex, size_t modCount )
 {
-    std::cout << "Processing special block " << std::hex << header.magic << std::endl;
-
-    uint32_t value = 0;
+    T value = 0;
     char * valuePtr = reinterpret_cast<char *>( &value );
-    uint16_t mask = 0x1;
-
     bool initialized = false;
-    uint32_t startingValue = 0;
-    uint32_t previous = 0;
-    for ( int i = 0; i < 5; i++ ) {
-        if ( header.crypt & mask ) {
+
+    T startingValue = 0;
+    T previous = 0;
+    for ( int i = 0; i < modCount; i++ ) {
+        if ( crypt & mask ) {
             infile.ignore( 1 );
         }
 
         infile.read( valuePtr, sizeof( value ) );
 
-        previous = deobfuscateValue<uint32_t>( value, sectionData, i, startingValue, previous, Modifiers[i] );
+        previous = deobfuscateValue<T>( value, sectionData + sectionOffset, startingValue, previous, Modifiers[i + modIndex] );
         if ( !initialized ) {
             startingValue = previous;
             initialized = true;
         }
 
+        sectionOffset += sizeof( value );
         mask <<= 1;
     }
+}
 
-    return header.length;
+uint32_t processStatsBlock( std::ifstream & infile, char * sectionData, SectionHeader header )
+{
+    std::cout << "Processing special block " << std::hex << header.magic << std::endl;
+
+    uint16_t mask = 0x1;
+    int sectionOffset = 0;
+
+    decryptStatsSection<uint32_t>( infile, sectionData, sectionOffset, mask, header.crypt, 0, 5 );
+
+    decryptStatsSection<uint8_t>( infile, sectionData, sectionOffset, mask, header.crypt, 5, 4 );
+
+    // Fields are not in order of processing
+    mask = 0x2000;
+    decryptStatsSection<uint32_t>( infile, sectionData, sectionOffset, mask, header.crypt, 9, 2 );
+
+    // Return to existing ordering
+    mask = 0x200;
+    decryptStatsSection<uint32_t>( infile, sectionData, sectionOffset, mask, header.crypt, 11, 5 );
+
+    std::cout << "Stats block shrunk to size " << std::dec << sectionOffset << " vs " << header.length << std::endl;
+    assert( sectionOffset == ExpectedStatBlockSize );
+    return sectionOffset;
 }
 
 bool verifyChecksum( char * sectionData, SectionHeader header )
 {
     uint32_t sectionChecksum = 0;
     for ( uint32_t idx = 0; idx < header.length; idx++ ) {
-        sectionChecksum = sectionChecksum * 2 + sectionData[idx];
+        sectionChecksum = sectionChecksum * 2 + static_cast<uint8_t>( sectionData[idx] );
     }
     std::cout << "Comparing checksum " << sectionChecksum << " expected " << header.checksum << std::endl;
     return sectionChecksum == header.checksum;
@@ -160,11 +182,11 @@ ReadingState processBlock( std::ifstream & infile, std::ofstream & outfile, uint
         const int blockEndPosition = startPos + header.length;
 
         // This block omits decoding bytes so len should be smaller
-        const uint32_t updatedLen = decryptStatsBlock( infile, readBuffer, header );
+        const uint32_t updatedLen = processStatsBlock( infile, readBuffer, header );
         assert( updatedLen <= header.length );
         header.length = updatedLen;
 
-        // assert( infile.tellg() == blockEndPosition );
+        assert( infile.tellg() == blockEndPosition );
         infile.seekg( blockEndPosition );
     }
     else {
@@ -185,7 +207,7 @@ ReadingState processBlock( std::ifstream & infile, std::ofstream & outfile, uint
 
 int main()
 {
-    std::cout << "Start" << std::endl;
+    std::cout << "Start a2c -> bin conversion" << std::endl;
 
     std::ifstream infile( "342679700273.a2c", std::ios::binary );
     if ( !infile ) {
@@ -207,9 +229,6 @@ int main()
         return 2;
     }
     outfile.write( reinterpret_cast<const char *>( &fileType ), sizeof( fileType ) );
-
-    std::streampos pos = infile.tellg();
-    std::cout << "Current file position: " << pos << std::endl;
 
     for ( const uint32_t blockHeading : DataBlocks ) {
         if ( processBlock( infile, outfile, blockHeading ) == ReadingState::MALFORMED ) {
