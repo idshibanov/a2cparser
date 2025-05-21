@@ -37,12 +37,12 @@ static const std::array<std::function<uint32_t( uint32_t, uint32_t, uint32_t )>,
     []( auto x, auto s, auto p ) { return x ^ 0x17ff12aa; },
     []( auto x, auto s, auto p ) { return x + s * 3 + 0xDEADBABE; },
     // 1 byte, attributes
-    []( auto x, auto s, auto p ) { return x + s * 19 + p * 17; }, // change start afterwards
+    []( auto x, auto s, auto p ) { return x + s * 19 + p * 17; }, // keep the same streak as before
     []( auto x, auto s, auto p ) { return x + p * 3; },
     []( auto x, auto s, auto p ) { return x + p * 5 + s; },
     []( auto x, auto s, auto p ) { return x + s * 7 + p * 9; },
     // 4 bytes with late mask
-    []( auto x, auto s, auto p ) { return x + 0xEFEDE68; }, // -0x10121974;
+    []( auto x, auto s, auto p ) { return x - 0x10121974; },
     []( auto x, auto s, auto p ) { return x; },
     // exp table
     []( auto x, auto s, auto p ) { return x ^ 0xdadedade; },
@@ -87,9 +87,9 @@ void decryptData( char * sectionData, SectionHeader header )
 template <typename T, typename F>
 T deobfuscateValue( T value, char * buffer, T start, T previous, F && modifier )
 {
-    std::cout << "Converting " << std::hex << value;
+    std::cout << "Converting " << std::hex << (uint32_t)value;
     value = static_cast<T>( modifier( value, start, previous ) );
-    std::cout << " to " << value << std::endl << std::dec;
+    std::cout << " to " << (uint32_t)value << std::endl << std::dec;
 
     T * output = reinterpret_cast<T *>( buffer );
     output[0] = value;
@@ -97,14 +97,13 @@ T deobfuscateValue( T value, char * buffer, T start, T previous, F && modifier )
 }
 
 template <typename T>
-void decryptStatsSection( std::ifstream & infile, char * sectionData, int & sectionOffset, uint16_t & mask, uint16_t crypt, size_t modIndex, size_t modCount )
+T decryptStatsSection( std::ifstream & infile, char * sectionData, int & sectionOffset, uint16_t & mask, uint16_t crypt, size_t modIndex, size_t modCount, T start = 0,
+                          T previous = 0 )
 {
     T value = 0;
     char * valuePtr = reinterpret_cast<char *>( &value );
     bool initialized = false;
 
-    T startingValue = 0;
-    T previous = 0;
     for ( int i = 0; i < modCount; i++ ) {
         if ( crypt & mask ) {
             infile.ignore( 1 );
@@ -112,15 +111,16 @@ void decryptStatsSection( std::ifstream & infile, char * sectionData, int & sect
 
         infile.read( valuePtr, sizeof( value ) );
 
-        previous = deobfuscateValue<T>( value, sectionData + sectionOffset, startingValue, previous, Modifiers[i + modIndex] );
+        previous = deobfuscateValue<T>( value, sectionData + sectionOffset, start, previous, Modifiers[i + modIndex] );
         if ( !initialized ) {
-            startingValue = previous;
+            start = previous;
             initialized = true;
         }
 
         sectionOffset += sizeof( value );
         mask <<= 1;
     }
+    return previous;
 }
 
 uint32_t processStatsBlock( std::ifstream & infile, char * sectionData, SectionHeader header )
@@ -130,13 +130,16 @@ uint32_t processStatsBlock( std::ifstream & infile, char * sectionData, SectionH
     uint16_t mask = 0x1;
     int sectionOffset = 0;
 
-    decryptStatsSection<uint32_t>( infile, sectionData, sectionOffset, mask, header.crypt, 0, 5 );
+    uint32_t lastValue = decryptStatsSection<uint32_t>( infile, sectionData, sectionOffset, mask, header.crypt, 0, 5 );
+    uint32_t startingValue = *reinterpret_cast<uint32_t *>( sectionData );
 
-    decryptStatsSection<uint8_t>( infile, sectionData, sectionOffset, mask, header.crypt, 5, 4 );
+    decryptStatsSection<uint8_t>( infile, sectionData, sectionOffset, mask, header.crypt, 5, 4, startingValue & 0xFF, lastValue & 0xFF );
 
     // Fields are not in order of processing
+    mask = 0x4000;
+    decryptStatsSection<uint32_t>( infile, sectionData, sectionOffset, mask, header.crypt, 9, 1 );
     mask = 0x2000;
-    decryptStatsSection<uint32_t>( infile, sectionData, sectionOffset, mask, header.crypt, 9, 2 );
+    decryptStatsSection<uint32_t>( infile, sectionData, sectionOffset, mask, header.crypt, 10, 1 );
 
     // Return to existing ordering
     mask = 0x200;
@@ -153,8 +156,11 @@ bool verifyChecksum( char * sectionData, SectionHeader header )
     for ( uint32_t idx = 0; idx < header.length; idx++ ) {
         sectionChecksum = sectionChecksum * 2 + static_cast<uint8_t>( sectionData[idx] );
     }
-    std::cout << "Comparing checksum " << sectionChecksum << " expected " << header.checksum << std::endl;
-    return sectionChecksum == header.checksum;
+    if ( sectionChecksum != header.checksum ) {
+        std::cerr << "Invalid checksum! " << sectionChecksum << " expected " << header.checksum << ". Len is " << header.length << std::endl;
+        return false;
+    }
+    return true;
 }
 
 ReadingState processBlock( std::ifstream & infile, std::ofstream & outfile, uint32_t blockHeading )
@@ -195,7 +201,6 @@ ReadingState processBlock( std::ifstream & infile, std::ofstream & outfile, uint
     }
 
     if ( !verifyChecksum( readBuffer, header ) ) {
-        std::cerr << "Invalid checksum!" << std::endl;
         return ReadingState::MISMATCH;
     }
 
