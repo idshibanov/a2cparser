@@ -192,8 +192,9 @@ ReadingState processBlock( std::ifstream & infile, std::ofstream & outfile, uint
         assert( updatedLen <= header.length );
         header.length = updatedLen;
 
-        assert( infile.tellg() == blockEndPosition );
-        infile.seekg( blockEndPosition );
+        // Original header len is wrong at times; skip
+        // assert( pp == blockEndPosition );
+        // infile.seekg( blockEndPosition );
     }
     else {
         infile.read( reinterpret_cast<char *>( &readBuffer ), header.length );
@@ -214,7 +215,7 @@ int main()
 {
     std::cout << "Start a2c -> bin conversion" << std::endl;
 
-    std::ifstream infile( "342679700273.a2c", std::ios::binary );
+    std::ifstream infile( "25239459341741.a2c", std::ios::binary );
     if ( !infile ) {
         std::cerr << "Cannot open a2c file for reading!\n";
         return 2;
