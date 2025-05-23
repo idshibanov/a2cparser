@@ -60,8 +60,7 @@ static const std::array<std::pair<uint16_t, std::function<uint32_t( uint32_t, ui
         { 0x800, []( auto x, auto s, auto p ) { return x + p * 0xFFFFF88F; } },
         { 0x1000, []( auto x, auto s, auto p ) { return x + p * 0xFFFFF88F; } },
         { 0x2000, []( auto x, auto s, auto p ) { return x + p * 0xFFFFF88F; } },
-    }
-};
+    } };
 
 enum class ReadingState
 {
@@ -96,20 +95,18 @@ void decryptData( char * sectionData, SectionHeader header )
 }
 
 template <typename T, typename F>
-T deobfuscateValue( T value, char * buffer, T start, T previous, F && modifier )
+T deobfuscateValue( T value, T * buffer, T start, T previous, F && modifier )
 {
     std::cout << "Converting " << std::hex << (uint32_t)value;
     value = static_cast<T>( modifier( value, start, previous ) );
     std::cout << " to " << (uint32_t)value << std::endl << std::dec;
 
-    T * output = reinterpret_cast<T *>( buffer );
-    output[0] = value;
+    *buffer = value;
     return value;
 }
 
 template <typename T>
-T decryptStatsSection( std::ifstream & infile, char * sectionData, int & sectionOffset, uint16_t crypt, size_t modIndex, size_t modCount, T start = 0,
-                       T previous = 0 )
+T decryptStatsSection( std::ifstream & infile, T * dataPtr, uint16_t crypt, size_t modIndex, size_t modCount, T start = 0, T previous = 0 )
 {
     T value = 0;
     char * valuePtr = reinterpret_cast<char *>( &value );
@@ -124,38 +121,34 @@ T decryptStatsSection( std::ifstream & infile, char * sectionData, int & section
 
         infile.read( valuePtr, sizeof( value ) );
 
-        previous = deobfuscateValue<T>( value, sectionData + sectionOffset, start, previous, modifierPair.second );
+        previous = deobfuscateValue<T>( value, dataPtr, start, previous, modifierPair.second );
         if ( !initialized ) {
             start = previous;
             initialized = true;
         }
 
-        sectionOffset += sizeof( value );
+        *dataPtr = *dataPtr++;
     }
     return previous;
 }
 
-uint32_t processStatsBlock( std::ifstream & infile, char * sectionData, SectionHeader header )
+StatsBlock parseStatsBlock( std::ifstream & infile, char * sectionData, SectionHeader header )
 {
-    std::cout << "Processing special block " << std::hex << header.magic << std::endl;
+    std::cout << "Parsing stats block " << std::hex << header.magic << std::endl;
 
-    int sectionOffset = 0;
+    StatsBlock stats = {};
 
-    uint32_t lastValue = decryptStatsSection<uint32_t>( infile, sectionData, sectionOffset, header.crypt, 0, 5 );
-    uint32_t startingValue = *reinterpret_cast<uint32_t *>( sectionData );
+    decryptStatsSection<uint32_t>( infile, stats.score, header.crypt, 0, 5 );
 
-    decryptStatsSection<uint8_t>( infile, sectionData, sectionOffset, header.crypt, 5, 4, startingValue & 0xFF, lastValue & 0xFF );
+    // 1 byte values that rely on prev block
+    decryptStatsSection<uint8_t>( infile, stats.stat, header.crypt, 5, 4, stats.score[0] & 0xFF, stats.gold & 0xFF );
 
     // Fields are not in order of processing
-    decryptStatsSection<uint32_t>( infile, sectionData, sectionOffset, header.crypt, 9, 1 );
-    decryptStatsSection<uint32_t>( infile, sectionData, sectionOffset, header.crypt, 10, 1 );
+    decryptStatsSection<uint32_t>( infile, stats.spells, header.crypt, 9, 2 );
 
-    // Return to existing ordering
-    decryptStatsSection<uint32_t>( infile, sectionData, sectionOffset, header.crypt, 11, 5 );
+    decryptStatsSection<uint32_t>( infile, stats.exp, header.crypt, 11, 5 );
 
-    std::cout << "Stats block shrunk to size " << std::dec << sectionOffset << " vs " << header.length << std::endl;
-    assert( sectionOffset == ExpectedStatBlockSize );
-    return sectionOffset;
+    return stats;
 }
 
 bool verifyChecksum( char * sectionData, SectionHeader header )
@@ -196,9 +189,11 @@ ReadingState processBlock( std::ifstream & infile, std::ofstream & outfile, uint
         const int blockEndPosition = startPos + header.length;
 
         // This block omits decoding bytes so len should be smaller
-        const uint32_t updatedLen = processStatsBlock( infile, readBuffer, header );
-        assert( updatedLen <= header.length );
-        header.length = updatedLen;
+        const StatsBlock stats = parseStatsBlock( infile, readBuffer, header );
+
+        StatsBlock * output = reinterpret_cast<StatsBlock *>( readBuffer );
+        *output = stats;
+        header.length = sizeof( stats );
 
         // Original header len is wrong at times; skip
         // assert( pp == blockEndPosition );
