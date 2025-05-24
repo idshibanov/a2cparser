@@ -3,11 +3,16 @@
 #include <fstream>
 #include <functional>
 #include <iostream>
+#include <random>
 
 constexpr uint32_t a2cFileType = 0x04507989;
 
 constexpr size_t BufferSizeLimit = 2560;
 char readBuffer[BufferSizeLimit] = {};
+
+static std::random_device rd;
+static std::mt19937 gen( rd() );
+std::uniform_int_distribution<uint16_t> seedDistribution( 0, 0xFFFF );
 
 constexpr std::array<uint32_t, 6> DataBlocks = {
     0xAAAAAAAA, // player info
@@ -38,28 +43,28 @@ struct StatsBlock
 };
 
 constexpr size_t ModifiersCount = 16;
-static const std::array<std::pair<uint16_t, std::function<uint32_t( uint32_t, uint32_t, uint32_t )>>, ModifiersCount> Modifiers = {
+static const std::array<std::pair<uint16_t, std::function<uint32_t( uint32_t, uint32_t, uint32_t, bool )>>, ModifiersCount> Modifiers = {
     // 4 byte values
     {
-        { 0x1, []( auto x, auto s, auto p ) { return x ^ 0x1529251; } },
-        { 0x2, []( auto x, auto s, auto p ) { return x + s * 5 + 0x13141516; } },
-        { 0x4, []( auto x, auto s, auto p ) { return x + p * 7 + 0xabcdef; } },
-        { 0x8, []( auto x, auto s, auto p ) { return x ^ 0x17ff12aa; } },
-        { 0x10, []( auto x, auto s, auto p ) { return x + s * 3 + 0xDEADBABE; } },
+        { 0x1, []( auto x, auto s, auto p, bool add = true ) { return x ^ 0x1529251; } },
+        { 0x2, []( auto x, auto s, auto p, bool add = true ) { return ( add ) ? x + s * 5 + 0x13141516 : x - s * 5 - 0x13141516; } },
+        { 0x4, []( auto x, auto s, auto p, bool add = true ) { return ( add ) ? x + p * 7 + 0xabcdef : x - p * 7 - 0xabcdef; } },
+        { 0x8, []( auto x, auto s, auto p, bool add = true ) { return x ^ 0x17ff12aa; } },
+        { 0x10, []( auto x, auto s, auto p, bool add = true ) { return ( add ) ? x + s * 3 + 0xdeadbabe : x - s * 3 - 0xdeadbabe; } },
         // 1 byte, attributes
-        { 0x20, []( auto x, auto s, auto p ) { return x + s * 19 + p * 17; } }, // keep the same streak as before
-        { 0x40, []( auto x, auto s, auto p ) { return x + p * 3; } },
-        { 0x80, []( auto x, auto s, auto p ) { return x + p * 5 + s; } },
-        { 0x100, []( auto x, auto s, auto p ) { return x + s * 7 + p * 9; } },
+        { 0x20, []( auto x, auto s, auto p, bool add = true ) { return ( add ) ? x + s * 19 + p * 17 : x - s * 19 - p * 17; } }, // keep the same streak as before
+        { 0x40, []( auto x, auto s, auto p, bool add = true ) { return ( add ) ? x + p * 3 : x - p * 3; } },
+        { 0x80, []( auto x, auto s, auto p, bool add = true ) { return ( add ) ? x + p * 5 + s : x - p * 5 - s; } },
+        { 0x100, []( auto x, auto s, auto p, bool add = true ) { return ( add ) ? x + s * 7 + p * 9 : x - s * 7 - p * 9; } },
         // 4 bytes with late mask
-        { 0x4000, []( auto x, auto s, auto p ) { return x - 0x10121974; } },
-        { 0x2000, []( auto x, auto s, auto p ) { return x; } },
+        { 0x4000, []( auto x, auto s, auto p, bool add = true ) { return ( add ) ? x - 0x10121974 : x + 0x10121974; } },
+        { 0x2000, []( auto x, auto s, auto p, bool add = true ) { return x; } },
         // exp table
-        { 0x200, []( auto x, auto s, auto p ) { return x ^ 0xdadedade; } },
-        { 0x400, []( auto x, auto s, auto p ) { return x + p * 0xFFFFF88F; } },
-        { 0x800, []( auto x, auto s, auto p ) { return x + p * 0xFFFFF88F; } },
-        { 0x1000, []( auto x, auto s, auto p ) { return x + p * 0xFFFFF88F; } },
-        { 0x2000, []( auto x, auto s, auto p ) { return x + p * 0xFFFFF88F; } },
+        { 0x200, []( auto x, auto s, auto p, bool add = true ) { return x ^ 0xdadedade; } },
+        { 0x400, []( auto x, auto s, auto p, bool add = true ) { return ( add ) ? x + p * 0xFFFFF88F : x - p * 0xFFFFF88F; } },
+        { 0x800, []( auto x, auto s, auto p, bool add = true ) { return ( add ) ? x + p * 0xFFFFF88F : x - p * 0xFFFFF88F; } },
+        { 0x1000, []( auto x, auto s, auto p, bool add = true ) { return ( add ) ? x + p * 0xFFFFF88F : x - p * 0xFFFFF88F; } },
+        { 0x2000, []( auto x, auto s, auto p, bool add = true ) { return ( add ) ? x + p * 0xFFFFF88F : x - p * 0xFFFFF88F; } },
     } };
 
 enum class ReadingState
@@ -68,6 +73,15 @@ enum class ReadingState
     MISMATCH,
     VALID
 };
+
+uint32_t calculateChecksum( char * sectionData, const uint32_t length )
+{
+    uint32_t sectionChecksum = 0;
+    for ( uint32_t idx = 0; idx < length; idx++ ) {
+        sectionChecksum = sectionChecksum * 2 + static_cast<uint8_t>( sectionData[idx] );
+    }
+    return sectionChecksum;
+}
 
 void decryptData( char * sectionData, SectionHeader header )
 {
@@ -95,13 +109,12 @@ void decryptData( char * sectionData, SectionHeader header )
 }
 
 template <typename T, typename F>
-T deobfuscateValue( T value, T * buffer, T start, T previous, F && modifier )
+T deobfuscateValue( T value, T start, T previous, F && modifier, bool add = true )
 {
     std::cout << "Converting " << std::hex << (uint32_t)value;
-    value = static_cast<T>( modifier( value, start, previous ) );
+    value = static_cast<T>( modifier( value, start, previous, add ) );
     std::cout << " to " << (uint32_t)value << std::endl << std::dec;
 
-    *buffer = value;
     return value;
 }
 
@@ -119,20 +132,74 @@ T decryptStatsSection( std::ifstream & infile, T * dataPtr, uint16_t crypt, size
             infile.ignore( 1 );
         }
 
+
         infile.read( valuePtr, sizeof( value ) );
 
-        previous = deobfuscateValue<T>( value, dataPtr, start, previous, modifierPair.second );
+        previous = deobfuscateValue<T>( value, start, previous, modifierPair.second );
         if ( !initialized ) {
             start = previous;
             initialized = true;
         }
 
-        *dataPtr = *dataPtr++;
+        *dataPtr = previous;
+        dataPtr++;
     }
     return previous;
 }
 
-StatsBlock parseStatsBlock( std::ifstream & infile, char * sectionData, SectionHeader header )
+template <typename T>
+void obfuscateBlock( T * source, char * output, SectionHeader & header, size_t modIndex, size_t modCount, T start = 0, T previous = 0 )
+{
+    bool initialized = false;
+
+    for ( int i = 0; i < modCount; i++ ) {
+        const auto modifierPair = Modifiers[modIndex + i];
+
+        if ( header.crypt & modifierPair.first ) {
+            *output = 0x7F;
+            output++;
+            header.length++;
+        }
+
+        previous = deobfuscateValue<T>( *source, start, previous, modifierPair.second, false );
+        std::swap( previous, *source );
+        if ( !initialized ) {
+            start = previous;
+            initialized = true;
+        }
+
+        T * outputPtr = reinterpret_cast<T *>( output );
+        *outputPtr = *source;
+
+        output += sizeof( T );
+        source++;
+    }
+}
+
+void serializeStatsBlock( StatsBlock & stats, SectionHeader & header, char * output )
+{
+    std::cout << "Starting block length is " << header.length << std::endl;
+    header.magic = DataBlocks[4];
+    header.length = sizeof( StatsBlock );
+    // header.crypt = seedDistribution( gen );
+    header.checksum = calculateChecksum( reinterpret_cast<char *>( &stats ), header.length );
+
+    /*
+    *reinterpret_cast<SectionHeader *>( output ) = header;
+    output += sizeof( header );
+    */
+
+    uint8_t s = stats.score[0] & 0xFF;
+    uint8_t p = stats.gold & 0xFF;
+    obfuscateBlock( stats.score, output, header, 0, 5 );
+    obfuscateBlock<uint8_t>( stats.stat, output + 20, header, 5, 4, s, p );
+    obfuscateBlock( stats.spells, output + 25, header, 9, 2 );
+    obfuscateBlock( stats.exp, output + 33, header, 11, 5 );
+
+    std::cout << "Serialized block length is " << header.length << std::endl;
+}
+
+StatsBlock parseStatsBlock( std::ifstream & infile, SectionHeader header )
 {
     std::cout << "Parsing stats block " << std::hex << header.magic << std::endl;
 
@@ -149,19 +216,6 @@ StatsBlock parseStatsBlock( std::ifstream & infile, char * sectionData, SectionH
     decryptStatsSection<uint32_t>( infile, stats.exp, header.crypt, 11, 5 );
 
     return stats;
-}
-
-bool verifyChecksum( char * sectionData, SectionHeader header )
-{
-    uint32_t sectionChecksum = 0;
-    for ( uint32_t idx = 0; idx < header.length; idx++ ) {
-        sectionChecksum = sectionChecksum * 2 + static_cast<uint8_t>( sectionData[idx] );
-    }
-    if ( sectionChecksum != header.checksum ) {
-        std::cerr << "Invalid checksum! " << sectionChecksum << " expected " << header.checksum << ". Len is " << header.length << std::endl;
-        return false;
-    }
-    return true;
 }
 
 ReadingState processBlock( std::ifstream & infile, std::ofstream & outfile, uint32_t blockHeading )
@@ -189,11 +243,9 @@ ReadingState processBlock( std::ifstream & infile, std::ofstream & outfile, uint
         const int blockEndPosition = startPos + header.length;
 
         // This block omits decoding bytes so len should be smaller
-        const StatsBlock stats = parseStatsBlock( infile, readBuffer, header );
+        StatsBlock stats = parseStatsBlock( infile, header );
 
-        StatsBlock * output = reinterpret_cast<StatsBlock *>( readBuffer );
-        *output = stats;
-        header.length = sizeof( stats );
+        serializeStatsBlock( stats, header, readBuffer );
 
         // Original header len is wrong at times; skip
         // assert( pp == blockEndPosition );
@@ -202,11 +254,14 @@ ReadingState processBlock( std::ifstream & infile, std::ofstream & outfile, uint
     else {
         infile.read( reinterpret_cast<char *>( &readBuffer ), header.length );
         decryptData( readBuffer, header );
+
+        const uint32_t sectionChecksum = calculateChecksum( readBuffer, header.length );
+        if ( sectionChecksum != header.checksum ) {
+            std::cerr << "Invalid checksum! " << sectionChecksum << " expected " << header.checksum << ". Len is " << header.length << std::endl;
+            return ReadingState::MISMATCH;
+        }
     }
 
-    if ( !verifyChecksum( readBuffer, header ) ) {
-        return ReadingState::MISMATCH;
-    }
 
     outfile.write( reinterpret_cast<const char *>( &header ), sizeof( header ) );
     outfile.write( reinterpret_cast<const char *>( readBuffer ), header.length );
@@ -218,7 +273,7 @@ int main()
 {
     std::cout << "Start a2c -> bin conversion" << std::endl;
 
-    std::ifstream infile( "342679700273.a2c", std::ios::binary );
+    std::ifstream infile( "342679700274.a2c", std::ios::binary );
     if ( !infile ) {
         std::cerr << "Cannot open a2c file for reading!\n";
         return 2;
