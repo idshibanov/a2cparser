@@ -148,16 +148,17 @@ T decryptStatsSection( std::ifstream & infile, T * dataPtr, uint16_t crypt, size
 }
 
 template <typename T>
-void obfuscateBlock( T * source, char * output, SectionHeader & header, size_t modIndex, size_t modCount, T start = 0, T previous = 0 )
+int obfuscateBlock( T * source, char * output, SectionHeader & header, size_t modIndex, size_t modCount, T start = 0, T previous = 0 )
 {
+    int offset = 0;
     bool initialized = false;
 
     for ( int i = 0; i < modCount; i++ ) {
         const auto modifierPair = Modifiers[modIndex + i];
 
         if ( header.crypt & modifierPair.first ) {
-            *output = 0x7F;
-            output++;
+            *( output + offset ) = 0x7F;
+            offset++;
             header.length++;
         }
 
@@ -168,12 +169,13 @@ void obfuscateBlock( T * source, char * output, SectionHeader & header, size_t m
             initialized = true;
         }
 
-        T * outputPtr = reinterpret_cast<T *>( output );
+        T * outputPtr = reinterpret_cast<T *>( output + offset );
         *outputPtr = *source;
 
-        output += sizeof( T );
+        offset += sizeof( T );
         source++;
     }
+    return offset;
 }
 
 void serializeStatsBlock( StatsBlock & stats, SectionHeader & header, char * output )
@@ -191,10 +193,12 @@ void serializeStatsBlock( StatsBlock & stats, SectionHeader & header, char * out
 
     uint8_t s = stats.score[0] & 0xFF;
     uint8_t p = stats.gold & 0xFF;
-    obfuscateBlock( stats.score, output, header, 0, 5 );
-    obfuscateBlock<uint8_t>( stats.stat, output + 20, header, 5, 4, s, p );
-    obfuscateBlock( stats.spells, output + 25, header, 9, 2 );
-    obfuscateBlock( stats.exp, output + 33, header, 11, 5 );
+    int offset = obfuscateBlock( stats.score, output, header, 0, 5 );
+    offset += obfuscateBlock<uint8_t>( stats.stat, output + offset, header, 5, 4, s, p );
+    offset += obfuscateBlock( stats.spells, output + offset, header, 9, 2 );
+    offset += obfuscateBlock( stats.exp, output + offset, header, 11, 5 );
+
+    assert( offset == header.length );
 
     std::cout << "Serialized block length is " << header.length << std::endl;
 }
@@ -271,6 +275,7 @@ ReadingState processBlock( std::ifstream & infile, std::ofstream & outfile, uint
 
 int main()
 {
+
     std::cout << "Start a2c -> bin conversion" << std::endl;
 
     std::ifstream infile( "342679700274.a2c", std::ios::binary );
