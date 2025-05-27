@@ -3,6 +3,7 @@
 #include <vector>
 
 const uint16_t PKT_Magic = 0x1e4a;
+const uint16_t PKT_Start_Byte = 0x1;
 
 struct PKTHeader
 {

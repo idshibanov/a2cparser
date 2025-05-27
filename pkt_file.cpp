@@ -16,9 +16,10 @@ std::ostream & operator<<( std::ostream & os, const Item & it )
     return os;
 }
 
-void serializeItem( const Item & item )
+void serializeItem( std::ofstream & outfile, const Item & item )
 {
     ItemHeader header;
+    header.unknown1 = PKT_Start_Byte;
     header.flags = item.flags;
     header.modifierCount = item.modifiers.size() + 1;
     header.itemLength = header.modifierCount * 2 + 3;
@@ -27,6 +28,38 @@ void serializeItem( const Item & item )
 
     uint16_t * itemId = reinterpret_cast<uint16_t *>( &header );
     *itemId = packedIds;
+
+    outfile.write( reinterpret_cast<const char *>( &header ), sizeof( header ) );
+
+    outfile.put( '\x1' );
+    outfile.write( reinterpret_cast<const char *>( &item.price ), sizeof( uint32_t ) );
+
+    for ( auto & mod : item.modifiers ) {
+        outfile.write( reinterpret_cast<const char *>( &mod.first ), sizeof( uint8_t ) );
+        outfile.write( reinterpret_cast<const char *>( &mod.second ), sizeof( uint8_t ) );
+    }
+}
+
+void writePkt( const std::vector<Item> & items, const char * filename )
+{
+    std::ofstream outfile( filename, std::ios::binary );
+    if ( !outfile ) {
+        std::cerr << "Cannot create output pkt file!\n";
+        return;
+    }
+
+    PKTHeader fileHeader;
+    fileHeader.itemCount = items.size();
+    fileHeader.magic = PKT_Magic;
+
+    outfile.put( '\x0' );
+    outfile.write( reinterpret_cast<const char *>( &fileHeader ), sizeof( fileHeader ) );
+
+    for ( auto & item : items ) {
+        serializeItem( outfile, item );
+    }
+
+    outfile.close();
 }
 
 void parsePkt( const char * filename )
@@ -59,7 +92,7 @@ void parsePkt( const char * filename )
         std::cout << "Reading item " << std::hex << (int)header.recipeId << (int)header.materialId << std::dec;
         std::cout << ": " << (int)header.modifierCount << " modifiers, len is " << (int)header.itemLength << std::endl;
 
-        assert( header.unknown1 == 0x1 );
+        assert( header.unknown1 == PKT_Start_Byte );
         assert( header.itemLength == ( header.modifierCount * 2 + 3 ) );
 
         Item newItem;
@@ -83,13 +116,12 @@ void parsePkt( const char * filename )
             }
         }
 
-        serializeItem( newItem );
-
         items.push_back( newItem );
     }
 
     assert( items.size() == fileType.itemCount );
 
+    /*
     std::sort( items.begin(), items.end(), []( Item & left, Item & right ) {
         return std::tie( left.recipeId, left.quality, left.materialId ) < std::tie( right.recipeId, right.quality, right.materialId );
     } );
@@ -98,6 +130,9 @@ void parsePkt( const char * filename )
     for ( auto & item : items ) {
         std::cout << item;
     }
+    */
 
     infile.close();
+
+    writePkt( items, "output.pkt" );
 }
