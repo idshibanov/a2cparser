@@ -1,3 +1,5 @@
+#include "pkt_file.h"
+
 #include <array>
 #include <cassert>
 #include <fstream>
@@ -275,6 +277,7 @@ ReadingState processBlock( std::ifstream & infile, std::ofstream & outfile, uint
 
 int main()
 {
+    parsePkt( "itemname.pkt" );
 
     std::cout << "Start a2c -> bin conversion" << std::endl;
 
