@@ -128,6 +128,11 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="main.cpp" />
+    <ClCompile Include="pkt_file.cpp" />
+    <ClCompile Include="sidemath.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="pkt_file.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
